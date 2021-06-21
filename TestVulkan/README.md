@@ -1,8 +1,10 @@
 # Frist Triangle
 
-## Instacnce
+## Setup
 
-### Create an instance 创建实例
+### Instacnce
+
+#### Create an instance 创建实例
 
 Vulkan中的许多结构要求显式指定sType成员中的类型,将作为`pNext`的成员以指向扩展信息,使用值初始化时将其保留为`nullptr`.
 
@@ -76,15 +78,15 @@ Vulkan中的信息通过`struct`传递信息以代替`function`,通过填充结�
 
 在每个`VkExtensionProperties` 中，包含扩展的名字和版本号，可以通过循环得知这些信息,可以将这些信息与通过`glfwGetRequiredInstanceExtensions`得到的信息相比较
 
-### Cleaning up 清理实例
+#### Cleaning up 清理实例
 
 清理 Vk 实例的唯一机会在程序结束之前，通过`vkDestroyInstance`实现
 
 第一个参数为vk实例，第二个参数是一个可选参数，可以通过传递`nullptr`来忽略，其他的vk资源需要在vk实例清理钱销毁
 
-## Validation layers 验证层
+### Validation layers 验证层
 
-### 前言
+#### 前言
 
 由于Vulkan是围绕最小化驱动开销的思想设计的，因此对错误的检查十分有限，所以要求编写者明确自己所做的任何事
 
@@ -117,7 +119,7 @@ Vulkan没有任意内置的验证层，LunarG Vulkan SDK 提供了一组很好�
 
 以前 Vulkan 中有两种不同类型的验证层: 实例验证层和设备验证层。这个想法是，实例层只检查与全局 Vulkan 对象相关的调用，比如实例，而设备特定层只检查与特定 GPU 相关的调用。设备特定的层现在已被弃用，这意味着实例验证层应用于所有 Vulkan 调用。规范文档仍然建议您在设备级别启用验证层以实现兼容性，这是某些实现所要求的。我们只需在逻辑设备级别将相同的层指定为实例，稍后我们将看到这一点。
 
-### 使用验证层
+#### 使用验证层
 
 这节的目的在于了解如何启用 Vulkan SDK 提供的标准诊断层，需要通过指定验证层的名称来启用验证层，所有标准验证捆绑在一个包含在SDK中的层中，称为`VK_LAYER_KHRONOS_validation`
 
@@ -207,7 +209,7 @@ Vulkan没有任意内置的验证层，LunarG Vulkan SDK 提供了一组很好�
 
 若检查成功，则`vkCreateInstance`不会返回`VK_ERROR_LAYER_NOT_PRESENT`错误
 
-### Message callback 消息回调
+#### Message callback 消息回调
 
 在标准情况下，验证层会将调试信息输出至标准输出，但我们也可以通过显示的回调来自定义处理方式，这种方式下同样允许自定义是否显示某些指定的调试信息，因为不是所有的调试消息都是必要的
 
@@ -393,7 +395,7 @@ void cleanup() {
 }
 ```
 
-### Debugging instance creation and destruction 调试实例的创建与销毁
+#### Debugging instance creation and destruction 调试实例的创建与销毁
 
 对`vkCreateDebugUtilsMessengerEXT`调用而言，需要一个有效的实例，且在这实例销毁前通过`vkDestroyDebugUtilsMessengerEXT`销毁
 
@@ -480,9 +482,9 @@ void createInstance(){
 
 `debugCreateInfo` 变量放在 if 语句之外，以确保它不会在 `vkCreateInstance` 调用之前被销毁。通过这种方式创建一个额外的调试信使，它将在 `vkCreateInstance` 和 `vkDestroyInstance` 期间自动使用，并在此之后清理。
 
-## Physical devices and queue families 物理设备和家庭队列
+### Physical devices and queue families 物理设备和队列族
 
-### Selecting a physical device 选择物理设备
+#### Selecting a physical device 选择物理设备
 
 在通过 `VkInstance`初始化Vulkan库后，需要在系统中一个选择支持我们需要特性的图形卡
 
@@ -506,4 +508,282 @@ void pickPhysicalDevice(){
 VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
 ```
 
+检查支持Vulkan的显卡数量，若没有，则无法运行
+
+```cpp
+void pickPhysicalDevice(){
+    uint32_t deviceCount = 0;
+    vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
+    // 首先检查支持Vulkan的设备数量
+   
+    if(deviceCount == 0){
+        throw std::runtime_error("failed to find GPUs with Vulkan support!");
+    }
+}
+// 选择物理设备
+```
+
+现在分配一个数组来保存所有的`VkPhysicalDevice`
+
+```cpp
+std::vector<VkPhysicalDevice> devices(deviceCount);
+vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data());
+```
+
+由于不是每个显卡都是相同的，所以需要引入一个新的函数来判断该显卡是否适合我们要执行的操作
+
+```cpp
+bool isDeviceSuitable(VkPhysicalDevice device){
+    return true;
+}
+```
+
+逐个显卡检查是否适合操作，若适合则设为实际使用的物理设备
+
+```cpp
+for(const auto& device : devices){
+    if(isDeviceSuitable(device)){
+        physicalDevice = device;
+        break;;
+    }
+}
+
+if(physicalDevice == VK_NULL_HANDLE){
+    throw std::runtime_error("failed to find a suitable GPU!");
+}
+```
+
+#### Base device suitability checks 基本设备适用性检查
+
+可以通过`VkPhysicalDeviceProperties`查询物理设备的名称、类型与支持的Vulkan版本等基本设备属性
+
+```cpp
+VkPhysicalDeviceProperties deviceProperties;
+vkGetPhysicalDeviceProperties(device, &deviceProperties);
+```
+
+可以通过`VkPhysicalDeviceFeatures`查询物理设备的可选功能支持，比如纹理压缩，64位浮动和多视图渲染(对 VR 很有用) 
+
+在这个示例中，只需要Vulkan支持，即可使用，因此不需要对其进行特定的检查
+
+#### Queue families 队列族
+
+对Vulkan而言，几乎所有的操作都需要向队列提交指令，来自不同的队列族的队列有着不同的类型，每个队列族只允许命令的一个子集。例如，可能存在一个只允许处理计算命令的队列族，或者一个只允许内存传输相关命令的队列族
+
+通过添加一个新函数`findQueueFamilies`以检查设备支持的队列族与队列族支持我们使用的指令
+
+现在我们只需要寻找一个支持图形命令的队列，同时由于下一章需要另一个队列，所以要将索引打包为一个结构体
+
+```cpp
+struct QueueFamilyIndices{
+    uint32_t graphicsFamily;
+};
+
+QueueFamilyIndices findQueueFamilies(VkPhysicalDevice device){
+    QueueFamilyIndices indices;
+    
+    return indices;
+}
+```
+
+若队列族不可用，则在`findQueueFamilies`中抛出异常，但这个函数并不是一个决定设备适用性的位置，例如在某种情况下，我们更倾向于去选择具有专门传输队列的设备，但是这个并不是必须的，因此我们需要一些方法来表示是否找到了特定的队列族
+
+实际上并没有一种魔法值来表示队列族是否存在，因为uint32的任何值都可以是一个有效的队列族索引，因此这里使用C++17引入的新的数据结构来区分一个值是否存在
+
+`std::optional`是一个包装器，不包含任何值，直到为它分配了一些东西。在任何时候，都可以通过调用`has_value()`函数来确认是否包含值
+
+此时数据结构是这样的
+
+```cpp
+struct QueueFamilyIndices{
+    std::optional<uint32_t> graphicsFamily;
+};
+```
+
+使用`vkGetPhysicalDeviceQueueFamilyProperties`来检索队列族，使用`VkQueueFamilyProperties`来存储队列族的一些详细信息，包括支持的操作类型及基于该队列族创建的队列数量。需要至少一个支持`VK_QUEUE_GRAPHICS_BIT`的队列族
+
+```cpp
+uint32_t queueFamilyCount = 0;
+vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, nullptr);
+
+std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
+vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, queueFamilies.data());
+
+int i = 0;
+for(const auto& queueFamily : queueFamilies){
+    if(queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT){
+        indices.graphicsFamily = i;
+    }
+    i++;
+}
+```
+
+接下来使用`isDeviceSuitable`函数检查设备是否可以处理我们要使用的命令，同时改变`QueueFamilyIndices`结构体使得存在通用检查
+
+```cpp
+struct QueueFamilyIndices{
+    std::optional<uint32_t> graphicsFamily;
+    
+    bool isComplete(){
+        return graphicsFamily.has_value();
+    }
+};
+
+bool isDeviceSuitable(VkPhysicalDevice device){
+    QueueFamilyIndices indices = findQueueFamilies(device);
+    
+    return indices.isComplete();
+}
+```
+
+更新循环使得可以提前跳出
+
+```cpp
+for(const auto& queueFamily : queueFamilies){
+    if(queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT){
+        indices.graphicsFamily = i;
+    }
+    
+    if(indices.isComplete()){
+        break;
+    }
+    i++;
+}
+```
+
+### Logical device and queues 逻辑设备与队列
+
+在选择需要使用的物理设备后，我们需要设置一个逻辑设备与之交互。逻辑设备的创建类似于实例的创建，并且描述了我们需要使用的特性。由于我们已经查询了那些队列族是可用的，因此我们同时还要指定创建需要创建的队列。若存在不同的需求，甚至可以从同一个物理设备创建多个逻辑设备
+
+首先创建一个新的类成员来存储逻辑设备句柄
+
+```cpp
+VkDevice device;
+```
+
+接下来在`initVulkan`中，添加一个`createLogicalDevice`函数
+
+```cpp
+void initVulkan() {
+    createInstance();
+    setupDebugMessenger();
+    pickPhysicalDevice();
+    createLogicalDevice();
+}
+
+void createLogicalDevice() {
+
+}
+```
+
+#### Specifying the queues to be created 指定要创建的队列
+
+创建一个逻辑设备需要再次在struct中指定一系列细节，其中第一个将是`VkDeviceQueueCreateInfo`，这个结构描述了单个队列族所需的队列数量，现在我们只需要具有图形功能的队列
+
+```cpp
+    QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
+
+    VkDeviceQueueCreateInfo queueCreateInfo{};
+    queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+    queueCreateInfo.queueFamilyIndex = indices.graphicsFamily.value();
+    ueueCreateInfo.queueCount = 1;
+```
+
+当前可用的驱动程序只允许为每个队列族创建少量的队列，实际上不需要多于一个的队列。这是因为可以在多个线程上创建所有的命令缓冲区，然后通过一个低开销的调用在主线程上一次性提交它们
+
+Vulkan允许为队列分配优先级，以便使用0.0 - 1.0 之间的浮点数来影响命令缓冲区执行的调度，即使只有一个队列，这也是必须的。
+
+```cpp
+float queuePriority = 1.0f;
+queueCreateInfo.pQueuePriorities = &queuePriority;
+```
+
+#### Specifying used device features 指定使用的设备特性
+
+下一个要指定的信息是我们要使用的设备特性集。这些特性是我们在上一张利用`vkGetPhysicalDeviceFeatures`获取的，由于这里不需要任何特性，因此可以只是简单定义，当我们需要的时候再使用。
+
+```cpp
+VkPhysicalDeviceFeatures deviceFeatures{};
+```
+
+#### Creating the logical device 创建逻辑设备
+
+在上面两个指定值指定结束后，就可以填充`VkDeviceCreateInfo`了
+
+```cpp
+VkDeviceCreateInfo createInfo{};
+createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+```
+
+首先添加指向队列的创建信息和设备特性的指针
+
+```cpp
+createInfo.pQueueCreateInfos = &queueCreateInfo;
+createInfo.queueCreateInfoCount = 1;
+createInfo.pEnabledFeatures = &deviceFeatures;
+```
+
+其余信息与`VkInstanceCreateInfo`结构相似，并要求指定扩展与验证层，不同之处在于这些都是特定于设备的
+
+一个设备特定扩展的例子是`VK_KHR_swapchain`，它允许渲染的图像从指定设备显示到窗口，但有的设备可能只支持计算操作而不支持渲染
+
+`Vulkan`之前的实现对实例和设备的验证层进行了一定的区分，但在当前版本下，忽略了`VkDeviceCreateInfo`的`enabledLayerCount`与`ppEnabledLayerNames`字段，但也可以写入，使得代码可以向旧的版本实现兼容
+
+```cpp
+createInfo.enabledExtensionCount = 0;
+
+if(enableValidationLayers){
+    createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
+    createInfo.ppEnabledLayerNames = validationLayers.data();
+}
+else {
+    createInfo.enabledLayerCount = 0;
+}
+```
+
+就这样，我们现在通过调用相应名为`vkCreateDevice`的函数实例化逻辑设备
+
+```cpp
+if(vkCreateDevice(physicalDevice, &createInfo, nullptr, &device) != VK_SUCCESS){
+    throw std::runtime_error("failed to create logical device!");
+}
+// 参数是物理设备的接口，我们指定的创建信息，可选的分配回调指针和一个指向逻辑设备句柄的指针
+```
+
+在cleanup中对逻辑设备进行销毁
+
+```cpp
+void cleanup() {
+    vkDestroyDevice(device, nullptr);
+    
+    if(enableValidationLayers){
+        DestroyDebugUtilsMessengerEXT(instance, debugMessenger, nullptr);
+    }
+    
+    vkDestroyInstance(instance, nullptr);
+    // 清理 vk 实例
+
+    glfwDestroyWindow(window);
+    // 清理窗口
+
+    glfwTerminate();
+    // 关闭glfw
+}
+```
+
+#### Retrieving queue handles 检索队列句柄
+
+队列是根据逻辑设备的创建自动创建的，但是我们在创建逻辑设备后没有获得逻辑句柄，因此需要添加一个类成员来存储图形队列句柄
+
+```cpp
+VkQueue graphicsQueue;
+```
+
+当设备被销毁，设备的队列会被隐式清理，因此不需要在`cleanup`中声明
+
+可以使用`vkGetDeviceQueue`来检索每个队列族的队列句柄，参数为逻辑设备、队列族、队列索引与一个指向用于存储队列句柄的指针，由于只需要从族中创建一个队列，因此只需要使用索引0
+
+## Presentation 简报
+
+### Window surface 
 
