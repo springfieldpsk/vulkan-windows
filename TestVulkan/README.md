@@ -783,7 +783,205 @@ VkQueue graphicsQueue;
 
 可以使用`vkGetDeviceQueue`来检索每个队列族的队列句柄，参数为逻辑设备、队列族、队列索引与一个指向用于存储队列句柄的指针，由于只需要从族中创建一个队列，因此只需要使用索引0
 
-## Presentation 简报
+## Presentation 显示
 
-### Window surface 
+### Window surface 窗口表面
+
+由于Vulkan是一个与平台无关的API，所以它不能直接建立与系统窗口之间的接口。为了实现建立Vulkan与系统窗口之间的连接以显示在屏幕上，我们需要WSI(Window System Integration) 扩展。本章中讨论的第一个表面，即`VK_KHR_surface`。其公开了一个`VkSurfaceKHR`对象，以表示一种抽象类型的表面，用于呈现渲染的对象。这个表面将会返回至GLFW创建的窗口中。
+
+`VK_KHR_surface`是一个实例级的扩展，且我们已经启用了它，因为它包含在`glfwGetRequiredInstanceExtensions`返回的列表之中。同时这个列表还包括一些其他的WSL扩展，我们将在接下来几章中使用。
+
+创建实例后需要立刻创建窗口表面，因为它实际上会影响物理设备的选择，我们之所以推迟这样做，是因为窗口表面是渲染目标和表示这个更大主题的一部分，对此的解释会使基本设置变得混乱。还应该注意的是，窗口表面在 Vulkan 中是一个完全可选的组件，如果您只需要离屏渲染。Vulkan 允许你这样做，而不需要像创建一个不可见的窗口(OpenGL 必需的)。
+
+#### Window surface creation 创建窗口表面
+
+首先在调试回调的正下方添加一个表面类成员。
+
+```cpp
+VkSurfaceKHR surface;
+```
+
+尽管 `VkSurfaceKHR` 对象及其用法与平台无关，但它的创建并不意味着它不依赖于窗口系统的细节。例如，它需要在 Windows 上使用 HWND 和 HMODULE 句柄。因此，这个扩展有一个对特定平台的附加功能，在 Windows 上称为 `VK_KHR_win32_surface`，它也自动包含在 `glfwGetRequiredInstanceExtensions` 的列表中。
+
+我将演示如何使用这个特定于平台的扩展在 Windows 上创建一个表面，但在本教程中我们不会实际使用它。使用像 GLFW 这样的库，却使用特定于平台的代码是没有意义的。实际上，GLFW 拥有 `glfwCreateWindowSurface`，可以为我们处理平台差异。尽管如此，在我们开始依赖它之前， 我们还是要知道它的底层是如何实现的
+
+要访问本地平台函数，你需要更新顶部的 include
+
+```cpp
+#define VK_USE_PLATFORM_WIN32_KHR
+#define GLFW_INCLUDE_VULKAN
+#include <GLFW/glfw3.h>
+#define GLFW_EXPOSE_NATIVE_WIN32
+#include <GLFW/glfw3native.h>
+```
+
+因为窗口表面是 Vulkan 对象，所以它附带了一个需要填充的 `VkWin32SurfaceCreateInfoKHR` 结构。它有两个重要的参数`hwnd` 和 `hinstance`。这些是窗口和进程的句柄。
+
+```cpp
+VkWin32SurfaceCreateInfoKHR createInfo{};
+createInfo.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+createInfo.hwnd = glfwGetWin32Window(window);
+createInfo.hinstance = GetModuleHandle(nullptr);
+```
+
+使用 `glfwGetWin32Window` 函数从 GLFW 窗口对象获取原始 `HWND`。`GetModuleHandle` 调用返回当前进程的 `HINSTANCE` 句柄。
+
+之后可以使用 `vkCreateWin32SurfaceKHR` 创建表面，其中包括实例的参数、表面创建细节、自定义分配器和表面句柄的变量。从技术上讲，这是一个 WSI 扩展函数，但是它使用非常普遍，以至于标准 Vulkan loader 包含了它，因此与其他扩展不同，您不需要显式地加载它。
+
+```cpp
+if (vkCreateWin32SurfaceKHR(instance, &createInfo, nullptr, &surface) != VK_SUCCESS) {
+    throw std::runtime_error("failed to create window surface!");
+}
+```
+
+这个过程在其他的平台上也是类似的，比如Linux，其中的`vkCreateXcbSurfaceKHR`使用 XCB 连接和窗口作为 X11的创建细节
+
+`glfwCreateWindowSurface`函数使用不同的实现为每个平台精确地执行这个操作。现在我们将把它整合到我们的程序中。在创建实例和 `setupDebugMessenger` 之后添加一个 `createSurface` 函数从 `initVulkan` 调用。
+
+```cpp
+void initVulkan() {
+    createInstance();
+    setupDebugMessenger();
+    createSurface();
+    pickPhysicalDevice();
+    createLogicalDevice();
+}
+
+void createSurface() {
+
+}
+```
+
+调用使用简单的参数而不是结构体，这使得函数的实现非常简单:
+
+```cpp
+void createSurface(){
+    if(glfwCreateWindowSurface(instance, window, nullptr, &surface) != VK_SUCCESS){
+        throw std::runtime_error("failed to create window surface!");
+    }
+}
+```
+
+这些参数分别为`VkInstance`、 GLFW 窗口指针、自定义分配器和指向 `VkSurfaceKHR` 变量的指针，通过相关的平台调用传递`VkResult`
+
+同时需要更改`cleanup`使得表面能在实例销毁前销毁
+
+```cpp
+void cleanup() {
+    vkDestroyDevice(device, nullptr);
+    
+    if(enableValidationLayers){
+        DestroyDebugUtilsMessengerEXT(instance, debugMessenger, nullptr);
+    }
+    vkDestroySurfaceKHR(instance, surface, nullptr);
+    vkDestroyInstance(instance, nullptr);
+    // 清理 vk 实例
+
+    glfwDestroyWindow(window);
+    // 清理窗口
+
+    glfwTerminate();
+    // 关闭glfw
+}
+```
+
+#### Querying for presentation support 查询显示支持
+
+虽然 Vulkan 实现可能支持窗口系统集成，但这并不意味着系统中的每个设备都支持它。因此，我们需要扩展 `isDeviceSuitable`，以确保设备能够将图像呈现到我们创建的表面。由于表示是一个特定于队列的特性，所以问题实际上是找到一个支持表示我们创建的表面的队列族。
+
+实际上，支持绘图命令的队列族和支持表示的队列族可能不会重叠。因此，我们必须考虑到，通过修改 `QueueFamilyIndices` 结构，可能存在一个不同的表示队列:
+
+```cpp
+struct QueueFamilyIndices{
+    std::optional<uint32_t> graphicsFamily;
+    std::optional<uint32_t> presentFamily;
+    
+    bool isComplete(){
+        return graphicsFamily.has_value() && presentFamily.has_value();
+    }
+};
+```
+
+接下来，我们将修改 `findQueueFamilies` 函数，以查找具有向窗口表面显示能力的队列族。要检查的函数是 `vkGetPhysicalDeviceSurfaceSupportKHR`，它将物理设备、队列族索引和曲面作为参数。在`VK_QUEUE_GRAPHICS_BIT`的同一个循环中添加对它的调用，并存储结果:
+
+```cpp
+QueueFamilyIndices findQueueFamilies(VkPhysicalDevice device){
+    QueueFamilyIndices indices;
+    
+    uint32_t queueFamilyCount = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, nullptr);
+    
+    std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
+    vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, queueFamilies.data());
+    
+    int i = 0;
+    for(const auto& queueFamily : queueFamilies){
+        if(queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT){
+            indices.graphicsFamily = i;
+        }
+        
+        VkBool32 presentSupport = false;
+        vkGetPhysicalDeviceSurfaceSupportKHR(device, i, surface, &presentSupport);
+        
+        if(presentSupport){
+            indices.presentFamily = i;
+        }
+        
+        if(indices.isComplete()){
+            break;
+        }
+        i++;
+    }
+    return indices;
+}
+```
+
+在获得结果时，这些队列很可能是相同的队列族，但是在整个程序中，我们将其视为单独的队列，以采取统一的方法。当然，也可以通过逻辑判断选择同一队列同时支持绘图与表示的物理设备，以提高性能
+
+#### 创建表现队列
+
+剩下的一件事是修改逻辑设备创建过程，以创建表示队列并检索 `VkQueue` 句柄。为句柄添加一个成员变量:
+
+```cpp
+VkQueue presentQueue;
+```
+
+接下来，由于需要多个`VkDeviceQueueCreateInfo`结构来创建来自两个队列族的队列，由于这两个队列可能为一个队列，所以利用`set`来进行去重，并修改 `VkDeviceCreateInfo`来指向`vector`
+
+```cpp
+QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
+
+std::vector<VkDeviceQueueCreateInfo> queueCreateInfos;
+std::set<uint32_t> uniqueQueueFamiles = {indices.graphicsFamily.value(),indices.presentFamily.value()};
+
+float queuePriority = 1.0f;
+for(uint32_t queueFamily : uniqueQueueFamiles){
+    VkDeviceQueueCreateInfo queueCreateInfo{};
+    queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+    queueCreateInfo.queueFamilyIndex = queueFamily;
+    queueCreateInfo.queueCount = 1;
+    queueCreateInfo.pQueuePriorities = &queuePriority;
+    queueCreateInfos.push_back(queueCreateInfo);
+}
+
+VkPhysicalDeviceFeatures deviceFeatures{};
+
+VkDeviceCreateInfo createInfo{};
+createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+
+createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueCreateInfos.size());
+createInfo.pQueueCreateInfos = queueCreateInfos.data();
+
+createInfo.pEnabledFeatures = &deviceFeatures;
+
+createInfo.enabledExtensionCount = 0;
+```
+
+最后添加调用来检索队列句柄，若队列族相同，则两个句柄的值也很可能是相同的
+
+```cpp
+vkGetDeviceQueue(device, indices.presentFamily.value(), 0, &presentQueue);
+```
+
+
 
