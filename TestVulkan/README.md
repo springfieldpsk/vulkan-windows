@@ -983,5 +983,425 @@ createInfo.enabledExtensionCount = 0;
 vkGetDeviceQueue(device, indices.presentFamily.value(), 0, &presentQueue);
 ```
 
+### Swap chain 交换链
+
+Vulkan 没有“默认帧缓冲区”的概念，因此它需要一个基础设施，这个基础设施拥有我们将提交给它们的缓冲区，然后我们才能在屏幕上可视化它们。这种基础设施称为交换链，必须在 Vulkan 中显式创建。交换链本质上是一个等待显示在屏幕上的图像队列。我们的应用程序从图像队列中获取图像并进行绘制，然后将它返回到队列中。队列的确切工作方式和从队列中显示图像的条件取决于交换链的设置方式，但交换链的一般用途是将图像的显示与屏幕的刷新率同步。
+
+#### Checking for swap chain support 检查交换链支持
+
+由于各种原因，并非所有的图形卡都能够将图像直接显示到屏幕上，例如，有些为服务器设计的图形卡，没有任何显示输出。其次，由于图像表示与窗口系统和与窗口相关的表面密切相关，它实际上并不是 Vulkan 内核的一部分。必须查询 `VK_KHR_swapchain` 设备扩展是否支持后，才可以启用该扩展。
+ 
+ 为此，我们将首先扩展 `isDeviceSuitable` 函数，以检查是否支持此扩展。我们之前已经了解了如何列出 `VkPhysicalDevice` 支持的扩展，因此这样做应该相当简单。注意 Vulkan 头文件提供了一个很好的宏 `VK_KHR_SWAPCHAIN_EXTENSION_NAME`，定义为 `VK_KHR_swapchain`。使用这个宏的优点是编译器可以捕获拼写错误。
+
+首先声明所需的设备扩展名列表，类似于要启用的验证层列表。
+
+```cpp
+const std::vector<const char*> deviceExtensions = {
+    VK_KHR_SWAPCHAIN_EXTENSION_NAME
+};
+// 设定启用的 Vulkan 设备扩展
+```
+
+接下来，创建一个新的函数 `checkDeviceExtensionSupport`，枚举扩展并检查所有必需的扩展是否都在其中，从 `isDeviceSuitable` 调用该函数作为附加检查:
+
+```cpp
+bool isDeviceSuitable(VkPhysicalDevice device){
+    QueueFamilyIndices indices = findQueueFamilies(device);
+    
+    bool extensionsSupported = checkDeviceExtensionSupport(device);
+    
+    return indices.isComplete() && extensionsSupported;
+}
+
+bool checkDeviceExtensionSupport(VkPhysicalDevice device){
+    uint32_t extensionCount;
+    vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, nullptr);
+    
+    std::vector<VkExtensionProperties> availableExtensions(extensionCount);
+    vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, availableExtensions.data());
+    
+    std::set<std::string> requiredExtensions(deviceExtensions.begin(),deviceExtensions.end());
+    
+    for(const auto& extension : availableExtensions){
+        requiredExtensions.erase(extension.extensionName);
+    }
+    
+    return requiredExtensions.empty();
+}
+// 检查Vulkan设备扩展可用性
+```
+
+这里使用一组字符串来表示未确认的必需扩展。这样我们就可以在列举可用扩展的序列时轻松地发现它们。当然，您也可以使用像 `checkValidationLayerSupport` 中那样的嵌套循环。性能差异在这里是无关紧要的。现在运行代码并验证您的显卡确实能够创建交换链。应该注意的是，正如我们在前一章中检查的那样，表示队列的可用性意味着交换链扩展必须得到支持。但是，对事件显式化总是好的，而且扩展必须显式启用。
+
+#### Enabling device extensions 启用设备扩展
+
+使用交换链首先需要启用 `VK_KHR_swapchain`扩展。启用扩展只需要对逻辑设备创建结构做一个小小的改变:
+
+```cpp
+// createLogicalDevice()
+createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
+createInfo.ppEnabledExtensionNames = deviceExtensions.data();
+```
+
+当您这样做时，确保替换现有的行 `createInfo.enabledExtensionCount = 0;`
+
+#### Querying details of swap chain support 查询交换链支持的详细信息
+
+仅仅检查交换链是否可用是不够的，因为它实际上可能与我们的窗口表面不兼容。创建交换链还涉及到比实例和设备创建更多的设置，因此在继续之前，我们需要查询更多的细节。
+
+基本上我们需要检查三类属性
+
+- 基本表面功能(交换链中图像的最小/最大数量、图像的最小/最大宽度和高度)
+- 表面格式(像素格式，颜色空间)
+- 可用的表示模式
+
+与 `findQueueFamilies` 类似，一旦查询了这些细节，我们将使用一个结构传递这些细节。上述三种类型的属性以下列结构和结构列表的形式出现:
+
+```cpp
+struct SwapChainSupportDetails{
+    VkSurfaceCapabilitiesKHR capabilities;
+    std::vector<VkSurfaceFormatKHR> formats;
+    std::vector<VkPresentModeKHR> presentModes;
+};
+```
+
+现在，我们将创建一个新函数 `querySwapChainSupport`，用于填充此结构。
+
+```cpp
+SwapChainSupportDetails querySwapChainSupport(VkPhysicalDevice device){
+    SwapChainSupportDetails details;
+    
+    return details;
+}
+// 获取交换链属性细节
+```
+
+本节讨论如何查询包含此信息的结构。下一节将讨论这些结构的含义以及它们究竟包含哪些数据。
+
+让我们从基本的表面能力开始。这些属性易于查询，并返回到单个 `VkSurfaceCapabilitiesKHR` 结构中。
+
+```cpp
+vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, surface, &details.capabilities);
+```
+
+这个函数在确定支持的功能时，会考虑指定的 `VkPhysicalDevice` 和 `VkSurfaceKHR` 窗口表面。所有支持查询函数都将这两个作为第一个参数，因为它们是交换链的核心组件。
+
+下一步是查询支持的表面格式。因为这是一个 structs 列表，所以它遵循了熟悉的2个函数调用的惯例:
+
+```cpp
+uint32_t formatCount;
+vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, nullptr);
+
+if(formatCount != 0){
+    details.formats.resize(formatCount);
+    vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, details.formats.data());
+}
+```
+
+确保调整vector的大小以保存所有可用的格式。最后，利用`vkGetPhysicalDeviceSurfacePresentModesKHR`使用相同的方式查询支持的表示模式
+
+```cpp
+uint32_t presentModeCount;
+vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, details.presentModes.data());
+
+if (presentModeCount != 0) {
+    details.presentModes.resize(presentModeCount);
+    vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, details.presentModes.data());
+}
+```
+
+现在所有的细节都在结构体中，因此让我们再次扩展 `isDeviceSuitable` 来利用这个函数来验证交换链支持是否足够。如果至少有一种支持的图像格式和一种给定窗口表面的支持的表示模式，对于本次教程，交换链的支持就足够了。
+
+```cpp
+bool isDeviceSuitable(VkPhysicalDevice device){
+    QueueFamilyIndices indices = findQueueFamilies(device);
+    
+    bool extensionsSupported = checkDeviceExtensionSupport(device);
+    
+    bool swapChainAdequate = false;
+    if(extensionsSupported){
+        SwapChainSupportDetails swapChainSupport = querySwapChainSupport(device);
+        swapChainAdequate = !swapChainSupport.formats.empty() && !swapChainSupport.presentModes.empty();
+    }
+    return indices.isComplete() && extensionsSupported;
+}
+// 检查设备支持性
+```
+
+重要的是，我们只有在验证扩展可用之后才尝试查询交换链支持。函数的最后一行更改为:
+
+```cpp
+return indices.isComplete() && extensionsSupported && swapChainAdequate;
+```
+
+#### Choosing the right settings for the swap chain 为交换链选择正确的设置
+
+如果`swapChainAdequate`的条件得到满足，那么支持肯定是充分的，但仍然可能有许多不同的最优化模式。现在，我们将编写一些函数来找到最佳交换链的正确设置。有三种类型的设置可以确定:
+
+- Surface format (color depth) 表面格式(颜色深度)
+- Presentation mode (conditions for "swapping" images to the screen) 表示模式(“交换”图像到屏幕的条件)
+- Swap extent (resolution of images in swap chain) 交换面积(交换链中映像的分辨率)
+
+对于这些设置中的每一个，都有一个理想值，如果它可用的话，我们将使用这个理想值，否则我们将创建一些逻辑来寻找下一个理想值
+
+##### Surface format 表面格式
+
+这个设置的函数是这样开始的。我们将 `SwapChainSupportDetails` 结构的格式成员作为参数传递。
+
+每个 `VkSurfaceFormatKHR` 条目包含一个`format`和一个 `colorSpace` 成员。`format`成员指定颜色通道和类型。例如，`VK_FORMAT_B8G8R8A8_SRGB` 意味着我们分别用一个8位无符号整数存储 R,G,B 和 alpha 通道，总共每像素32位。`colorSpace` 成员指示是否支持 SRGB 颜色空间或不使用 `VK_COLOR_SPACE_SRGB_NONLINEAR_KHR` 标志。注意，在旧版本的规范中，这个标志曾被称为 `VK_COLORSPACE_SRGB_NONLINEAR_KHR`
+
+对于色彩空间，若SRGB可用，我们将使用 SRGB，因为它能更准确的表示颜色。它也几乎是标准的图像色彩空间，就像我们稍后将要使用的纹理。同时我们也应该使用 SRGB 颜色格式，其中最常见的是 `VK_FORMAT_B8G8R8A8_SRGB`。
+
+让我们浏览一下这个列表，看看首选的组合是否可用，若不可用，则可以根据可用格式的优先程度进行排序，但在大多数情况下，只需要使用指定的第一个格式即可
+
+```cpp
+VkSurfaceFormatKHR chooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& availableFormats){
+    for(const auto& availableFormat : availableFormats){
+        if(availableFormat.format == VK_FORMAT_B8G8R8_SRGB && availableFormat.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR){
+            return availableFormat;
+        }
+    }
+    return availableFormats[0];
+}
+```
+
+##### Presentation mode 表示模式
+
+表示模式可以说是交换链最重要的设置，因为它代表了向屏幕显示图像的实际条件。Vulkan 有四种可能的模式:
+
+- `VK_PRESENT_MODE_IMMEDIATE_KHR`: 引用程序所递交的影像会即时传送到屏幕上，可能会造成撕裂
+- `VK_PRESENT_MODE_FIFO_KHR`:交换链是一个队列，其中显示在刷新显示时从队列的前面获取图像，并且程序在队列的后面插入已渲染的图像。如果队列已满，那么程序必须等待。这与现代游戏中的垂直同步最为相似。刷新显示的时刻称为“垂直空白”
+- `VK_PRESENT_MODE_FIFO_RELAXED_KHR`:这个模式与之前一个模式唯一的不同在于，若应用程序延迟且最后一个垂直空白处队列为空，不是等待下一个垂直空白，而是图像到达的瞬间直接传送到屏幕，这可能导致明显的撕裂
+- `VK_PRESENT_MODE_MAILBOX_KHR`:这是第二种模式的另一种变体。当队列已满时，不会阻塞应用程序，而是将已经排队的映像简单地替换为更新的映像。这种模式可以用来尽可能快地渲染帧，同时避免撕裂，从而比标准的垂直同步产生更少的延迟问题。这通常被称为“三重缓冲”，尽管三个缓冲区的存在本身并不一定意味着帧速率被解锁
+
+只有 `VK_PRESENT_MODE_FIFO_KHR` 模式保证可用，所以我们需要再次编写一个函数来寻找可用的最佳模式:
+
+```cpp
+VkPresentModeKHR chooseSwapPresentMode(const std::vector<VkPresentModeKHR>& availablePresentModes){
+    
+    return VK_PRESENT_MODE_FIFO_KHR;
+}
+// 获取表示模式
+```
+
+我个人认为，如果能源使用不是一个问题，那么 `VK_PRESENT_MODE_MAILBOX_KHR` 是一个非常好的权衡。通过尽可能在下一个垂直空白前渲染新的图像，以在一个相当低的延迟下避免出现撕裂。在移动设备上，能源使用更为重要，你可能会想要使用 `VK_PRESENT_MODE_FIFO_KHR` 来代替。现在，让我们浏览一下列表，看看 `VK_PRESENT_MODE_MAILBOX_KHR` 是否可用:
+
+```cpp
+VkPresentModeKHR chooseSwapPresentMode(const std::vector<VkPresentModeKHR>& availablePresentModes){
+    for(const auto& availablePresentMode : availablePresentModes){
+        if(availablePresentMode == VK_PRESENT_MODE_MAILBOX_KHR){
+            return availablePresentMode;
+        }
+    }
+    return VK_PRESENT_MODE_FIFO_KHR;
+}
+// 获取表示模式
+```
+
+##### Swap extent 交换面积
+
+这样就只剩下一个主要的属性，我们将为它添加最后一个函数:
+
+交换面积是交换链映像的分辨率，它几乎总是精确地等于我们要绘制的窗口的像素分辨率(稍后再详细说明)。可能的分辨率范围在 `VkSurfaceCapabilitiesKHR` 结构中定义。Vulkan 告诉我们通过设置 `currentExtent` 成员中的宽度和高度来匹配窗口的分辨率。然而，一些窗口管理器允许我们在这里有所不同，通过以一些特殊值来设置 `currentExtent` 成员中的宽度和高度:`uint32_t`的最大值。在这种情况下，我们将选择在 minImageExtent 和 maxImageExtent 范围内最匹配窗口的分辨率。但是我们必须用正确的单位指定分辨率。
+
+GLFW 在测量大小时使用两个单位: 像素和屏幕坐标。例如，我们在前面创建窗口时指定的分辨率`{WIDTH, HEIGHT}`时以屏幕坐标为标准。但 Vulkan 使用像素，因此交换链面积也必须以像素为单位指定。不幸的是，如果您使用高 DPI 显示器(如苹果的 Retina 显示器) ，屏幕坐标将不会一一对应像素。相反，由于更高的像素密度，窗口的像素分辨率将大于屏幕坐标分辨率。因此，如果 Vulkan 不能修复我们的交换面积，我们就不能使用原始的`{WIDTH, HEIGHT}`。因此，我们必须使用 `glfwGetFramebufferSize` 来查询窗口的像素分辨率，然后再将其与最小和最大图像范围进行匹配。
+
+```cpp
+VkExtent2D chooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities){
+    if(capabilities.currentExtent.width != UINT32_MAX){
+        return capabilities.currentExtent;
+    }
+    else {
+        int width, height;
+        glfwGetFramebufferSize(window, &width, &height);
+        
+        VkExtent2D actualExtent = {
+            static_cast<uint32_t>(width),
+            static_cast<uint32_t>(height)
+        };
+        
+        actualExtent.width = std::clamp(actualExtent.width, capabilities.maxImageExtent.width, capabilities.maxImageExtent.width);
+        actualExtent.height = std::clamp(actualExtent.height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height);
+        
+        return actualExtent;
+    }
+}
+```
+
+这里使用`clamp`函数将宽度和高度的值绑定到实现支持的允许的最小和最大范围之间。
+
+#### Creating the swap chain 创建交换链
+
+现在我们有了所有这些辅助函数来帮助我们在运行时做出选择，我们终于有了创建一个可工作的交换链所需的所有信息
+
+创建一个 `createSwapChain` 函数，以这些调用的结果开始，并确保在创建逻辑设备后从 `initVulkan` 调用它。
+
+```cpp
+void initVulkan() {
+    createInstance();
+    setupDebugMessenger();
+    createSurface();
+    pickPhysicalDevice();
+    createLogicalDevice();
+    createSwapChain();
+}
+void createSwapChain(){
+    SwapChainSupportDetails swapChainSupport = querySwapChainSupport(physicalDevice);
+    
+    VkSurfaceFormatKHR surfaceFormat = chooseSwapSurfaceFormat(swapChainSupport.formats);
+    VkPresentModeKHR presentMode = chooseSwapPresentMode(swapChainSupport.presentModes);
+    VkExtent2D extent = chooseSwapExtent(swapChainSupport.capabilities);
+    
+}
+// 创建交换链
+```
+
+除了这些属性之外，我们还必须决定在交换链中需要多少图像。该实现指定了它运行所需的最小数量
+
+```cpp
+uint32_t imageCount = swapChainSupport.capabilities.minImageCount;
+```
+
+然而，简单地坚持这个最小值意味着我们有时不得不等待驱动程序完成内部操作，然后才能获得另一个图像进行渲染。因此，建议请求至少比最低要求多一个图像:
+
+```cpp
+uint32_t imageCount = swapChainSupport.capabilities.minImageCount + 1;
+```
+
+我们还应该确保在执行此操作时不超过图像的最大数量，其中0是一个特殊值，意味着没有最大值:
+
+```cpp
+if(swapChainSupport.capabilities.maxImageCount > 0 && imageCount > swapChainSupport.capabilities.maxImageCount){
+    imageCount = swapChainSupport.capabilities.maxImageCount;
+}
+```
+
+与传统的 Vulkan 对象一样，创建交换链对象需要填充大型结构。在指定交换链应该绑定到哪个表面之后，将指定交换链映像的详细信息:
+
+```cpp
+VkSwapchainCreateInfoKHR createInfo{};
+createInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+createInfo.surface = surface;
+
+createInfo.minImageCount = imageCount;
+createInfo.imageFormat = surfaceFormat.format;
+createInfo.imageColorSpace = surfaceFormat.colorSpace;
+createInfo.imageExtent = extent;
+createInfo.imageArrayLayers = 1;
+createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+```
+
+`imageArrayLayers` 指定每个图像包含的图层数量。这总是1，除非你正在开发一个立体的3d 应用程序。`imageUsage` 位字段指定我们将在交换链中使用映像进行哪些操作。在本教程中，我们将直接渲染它们，这意味着它们被用作颜色附件。您还可以首先将图像渲染到单独的图像中，以执行诸如后处理之类的操作。在这种情况下，您可以使用 `VK_IMAGE_USAGE_TRANSFER_DST_BIT` 这样的值，并使用内存操作将渲染的图像转换为交换链图像。
+
+```cpp
+QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
+uint32_t queueFamilyIndices[] = {indices.graphicsFamily.value(), indices.presentFamily.value()};
+
+if(indices.graphicsFamily != indices.presentFamily){
+    createInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
+    createInfo.queueFamilyIndexCount = 2;
+    createInfo.pQueueFamilyIndices = queueFamilyIndices;
+} // 并发模式
+else {
+    createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    createInfo.queueFamilyIndexCount = 0;
+    createInfo.pQueueFamilyIndices = nullptr;
+} // 独占模式
+}
+```
+
+接下来，我们需要指定如何处理将跨多个队列族使用的交换链映像。如果图形队列家族与表示队列不同，那么在我们的应用程序中就会出现这种情况。我们将从图形队列中绘制交换链中的图像，然后在表示队列中提交它们。有两种方法可以处理从多个队列访问的图像:
+
+- `VK_SHARING_MODE_EXCLUSIVE` 图像每次由一个队列族拥有，在将其用于另一个队列族之前，必须明确转让其所有权。这个选项提供了最好的性能
+- `VK_SHARING_MODE_CONCURRENT` 图片可以跨多个队列族使用，不需要明确的所有权转移
+
+如果队列家族不同，那么我们将在本教程中使用并发模式，以避免执行所有权章节，因为这些涉及到一些概念，稍后将更好地解释。并发模式要求您提前指定使用 `queueFamilyIndexCount` 和 `pQueueFamilyIndices` 参数在哪些队列家族所有权之间共享。如果图形队列族和表示队列族是相同的，这在大多数硬件上都是如此，那么我们应该坚持独占模式，因为并发模式要求您指定至少两个不同的队列族。
+
+```cpp
+createInfo.preTransform = swapChainSupport.capabilities.currentTransform;
+```
+
+我们可以指定一个特定的转换应该应用于交换链中的图像，如果它被支持的话(由`capabilities`中的 `supportedTransforms`属性表示) ，比如90度顺时针旋转或水平翻转。若不需要任何的转换，那么只需要指定为当前转换
+
+```cpp
+createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+```
+
+`compositeAlpha` 字段指定是否应该使用 alpha 通道与窗口系统中的其他窗口混合。你几乎总是希望简单地忽略 alpha 通道，因此设定为 `VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR`。
+
+```cpp
+createInfo.presentMode = presentMode;
+createInfo.clipped = VK_TRUE;
+```
+
+`presentMode`成员的意思就是它本身的意思，它的值就是上文获取的值，若将`clipped`成员的属性设置为`VK_TRUE`,那么就意味着我们不关心被遮挡的像素的颜色，例如，因为另一个窗口在它们的前面。除非您真的需要读取这些像素并得到可预测的结果，可以通过启用剪切获得最佳性能。
+
+```cpp
+createInfo.oldSwapchain = VK_NULL_HANDLE;
+```
+
+最后一个属性`oldSwapChain`。使用 Vulkan 时，在应用程序运行时，交换链可能变得无效或未优化，例如，因为窗口的大小被调整了。在这种情况下，实际上需要从头开始重新创建交换链，并且必须在该字段中指定对旧交换链的引用。这是一个复杂的主题，我们将在以后的章节中学习更多。现在我们假设我们只创建一个交换链。
+
+现在添加一个类成员来存储 `VkSwapchainKHR` 对象，创建交换链现在只需要调用`vkCreateSwapchainKHR`
+
+```cpp
+// class
+VkSwapchainKHR swapChain;
+
+...
+// createSwapChain
+if(vkCreateSwapchainKHR(device, &createInfo, nullptr, &swapChain) != VK_SUCCESS){
+    throw std::runtime_error("failed to create swap chain!");
+}
+```
+
+这些参数包括逻辑设备、交换链创建信息、可选的自定义分配器和一个指向用于存储句柄的变量的指针。在清理设备前，应该使用 `vkDestroySwapchainKHR` 清理交换链:
+
+```cpp
+// cleanup
+vkDestroySwapchainKHR(device, swapChain, nullptr);
+vkDestroyDevice(device, nullptr);
+```
+
+现在运行应用程序以确保成功创建交换链！如果此时你在 `vkCreateSwapchainKHR` 中出现了访问冲突错误，或者看到`Failed to find 'vkGetInstanceProcAddress' in layer SteamOverlayVulkanLayer.dll`这样的消息，那么请查看关于蒸汽覆盖层的 [FAQ 条目](https://vulkan-tutorial.com/FAQ)。
+
+尝试删除 `createInfo.imageExtent = extent;` 在启用验证层的情况下运行。您将看到其中一个验证层立即捕捉到错误，并打印出一条有用的信息:
+
+```shell
+validation layer: Validation Error: [ VUID-VkSwapchainCreateInfoKHR-imageExtent-01274 ] Object 0: handle = 0x10605a218, type = VK_OBJECT_TYPE_DEVICE; | MessageID = 0x7cd0911d | vkCreateSwapchainKHR() called with imageExtent = (0,0), which is outside the bounds returned by vkGetPhysicalDeviceSurfaceCapabilitiesKHR(): currentExtent = (1600,1200), minImageExtent = (1,1), maxImageExtent = (16384,16384). The Vulkan spec states: imageExtent must be between minImageExtent and maxImageExtent, inclusive, where minImageExtent and maxImageExtent are members of the VkSurfaceCapabilitiesKHR structure returned by vkGetPhysicalDeviceSurfaceCapabilitiesKHR for the surface (https://vulkan.lunarg.com/doc/view/1.2.176.1/mac/1.2-extensions/vkspec.html#VUID-VkSwapchainCreateInfoKHR-imageExtent-01274)
+```
+
+#### Retrieving the swap chain images 检索交换链图像
+
+现在已经创建了交换链，因此剩下的工作就是检索其中的 `VkImages` 的句柄。在后面的章节中，我们将在渲染操作中引用这些。添加一个类成员来存储句柄:
+
+```cpp
+std::vector<VkImage> swapChainImages;
+// 存储VkImages句柄
+```
+
+这些映像是由交换链的实现创建的，一旦交换链被销毁，它们将自动清理，因此我们不需要添加任何清理代码。
+
+现在添加代码来检索 `createSwapChain` 函数末尾的句柄，就在 `vkCreateSwapchainKHR` 调用之后。检索它们与我们从 Vulkan 检索一个对象数组的其他时间非常相似。请记住，我们只在交换链中指定了最小数量的映像，因此交换链可能使用比我们定义更多的映像。这就是为什么我们将首先使用 `vkGetSwapchainImagesKHR` 查询最终的图像数量，然后调整容器的大小，最后再次调用它来检索句柄。
+
+```cpp
+vkGetSwapchainImagesKHR(device, swapChain, &imageCount, nullptr);
+swapChainImages.resize(imageCount);
+vkGetSwapchainImagesKHR(device, swapChain, &imageCount, swapChainImages.data());
+```
+
+最后一件事，将我们为交换链映像选择的格式和范围存储在成员变量中。我们在以后的章节里会需要它们
+
+```cpp
+// class
+VkFormat swapChainImageFormat;
+VkExtent2D swapChainExtent;
+
+// createSwapChain
+swapChainImageFormat = surfaceFormat.format;
+swapChainExtent = extent;
+```
+
+我们现在有了一组图像，可以绘制到窗口上，并可以显示。下一章将开始介绍如何将图像设置为渲染目标，然后我们开始查看实际的渲染绘图管线和绘制命令！
 
 
