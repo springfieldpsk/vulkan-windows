@@ -1404,4 +1404,160 @@ swapChainExtent = extent;
 
 我们现在有了一组图像，可以绘制到窗口上，并可以显示。下一章将开始介绍如何将图像设置为渲染目标，然后我们开始查看实际的渲染绘图管线和绘制命令！
 
+### Image views 图像视图
+
+要使用任何的`VkImage`,包括交换链中的 VkImage，我们必须在渲染管道中创建一个 `VkImageView` 对象,图像视图实际上就是对图像的视图。它描述了如何访问图像和访问图像的哪一部分，举个例子，它应该被视为没有任何 mipmapping 级别的二维纹理深度纹理。
+
+在本章中，我们将编写一个 `createImageViews` 函数，它为交换链中的每个图像创建一个基本的图像视图，以便我们以后可以将它们用作颜色目标。
+
+首先添加一个类成员来存储图像视图:
+
+```cpp
+std::vector<VkImageView> swapChainImageViews;
+// 图像视图
+```
+
+创建 `createImageViews` 函数，并在交换链创建后立即调用它。
+
+```cpp
+void initVulkan() {
+    createInstance();
+    setupDebugMessenger();
+    createSurface();
+    pickPhysicalDevice();
+    createLogicalDevice();
+    createSwapChain();
+    createImageViews();
+}
+
+void createImageViews() {
+
+}
+```
+
+我们需要做的第一件事是调整列表的大小，以适应我们将要创建的所有图像视图:
+
+```cpp
+swapChainImageViews.resize(swapChainImages.size());
+```
+
+接下来，设置遍历所有交换链映像的循环。
+
+```cpp
+for(size_t i = 0;i < swapChainImages.size(); i ++ ){
+    
+}
+```
+
+创建图像视图的参数在 VkImageViewCreateInfo 结构中指定。
+
+```cpp
+VkImageViewCreateInfo createInfo{};
+createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+createInfo.image = swapChainImages[i];
+```
+
+`viewType` 和 `format` 字段指定应该如何解释图像数据。`viewType` 参数允许您将图像视为一维纹理、二维纹理、三维纹理和立方体映射。
+
+```cpp
+createInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+createInfo.format = swapChainImageFormat;
+```
+
+`components`字段允许你调整周围的颜色通道。例如，您可以将所有通道映射到红色通道以获得单色纹理。您还可以将常量值0和1映射到通道。在我们的示例中，我们将坚持使用默认映射。
+
+```cpp
+createInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+createInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+createInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+createInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+```
+
+`subresourceRange`字段描述了图像的用途以及应该访问图像的哪一部分。我们的图像将被视作没有任何mipmapping等级或多图层的彩色目标。
+
+```cpp
+createInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+createInfo.subresourceRange.baseMipLevel = 0;
+createInfo.subresourceRange.layerCount = 1;
+createInfo.subresourceRange.baseArrayLayer = 0;
+createInfo.subresourceRange.levelCount = 1;
+```
+
+如果您正在开发立体图形3D应用程序，那么您将创建一个具有多个层的交换链。然后，您可以通过访问不同的图层，为每个表示左右眼视图的图像创建多个图像视图。
+
+现在通过`vkCreateImageView`创建图像视图
+
+```cpp
+if(vkCreateImageView(device, &createInfo, nullptr, &swapChainImageViews[i]) != VK_SUCCESS){
+    throw std::runtime_error("failed to create image views!");
+}
+```
+
+与映像不同，图像视图是由我们显式创建的，因此我们需要在程序结束时添加一个类似的循环来再次销毁它们:
+
+```cpp
+void cleanup() {
+    for(auto imageView : swapChainImageViews){
+        vkDestroyImageView(device, imageView, nullptr);
+    }
+    ...
+}
+```
+
+一个图像视图足以开始使用一个图像作为纹理，但是它还没有完全准备好用作渲染目标。这需要更多的间接步骤，称为 帧缓冲区。但是首先，我们必须建立渲染管线。
+
+## Graphics pipeline basics 渲染管线基础
+
+### Introduction 引言
+
+在接下来的几章中，我们将设置一个渲染管线，用于绘制第一个三角形。渲染管线是一系列的操作，通过这一系列操作使得网格上的顶点和纹理转化为渲染目标中的像素。以下是一个简化的概述:
+
+![Vulkan_pipeline](vulkan_simplified_pipeline.svg)
+
+The input assembler collects the raw vertex data from the buffers you specify and may also use an index buffer to repeat certain elements without having to duplicate the vertex data itself.
+
+输入装配器从您指定的缓冲区中获取原始顶点数据，并且可以使用索引缓冲区来重复某些元素，而无需复制顶点数据本身。（个人认为这段的意思为可以通过索引缓冲区避免出现顶点数据的重复复制）
+
+顶点数据载入后，通过顶点着色器渲染每个顶点，通常在这个阶段会将顶点位置从模型空间转换到屏幕空间，这个阶段处理结束的顶点数据将会沿管道传递到下一个阶段
+
+下个阶段是镶嵌着色器，镶嵌着色器允许你基于某些规则进行几何细分以提升网格的质量，这通常用于细化砖墙或楼梯等的表面，以使得摄像机在这些表面附近时，看起来有更多的起伏
+
+镶嵌着色器的数据经过处理将会传递到几何着色器，几何着色器在每个图元(三角形、直线、点)上运行，可以放弃这个阶段或者通过几何着色器输出比原始数据更多的图元。这个过程与镶嵌着色器类似，但是更加灵活。然而，它在今天的应用程序中并没有被广泛使用，因为除了英特尔的集成 gpu 之外，几何着色器在大多数显卡上的表现都不是很好。
+
+光栅化阶段会将上个阶段处理好的图元离散成片段。这些片段填充帧缓冲区中像素元素。任何位于屏幕范围之外的片段都会被丢弃，如图所示，顶点着色器输出的属性将会被插入片段中。通常情况下，那些被其他片段所覆盖的片段会因为深度测试而丢弃
+
+所有没有被放弃的片段将会传入片段着色器中，在这个阶段，片段着色器会确定每个片段的颜色、深度值以及写入那个帧缓冲区中。这些数据可以通过顶点着色器获得的结果插值得到，这些数据包括纹理坐标和用于光照计算的法线
+
+颜色混合阶段将会混合帧缓冲区中相同像素的不同片段。片段可以简单的相互覆盖、叠加或者根据透明度混合
+
+在上图中，绿色的阶段被称为固定功能阶段，这些阶段可以通过调整参数来调整实际的操作，但这些阶段的工作方式是预定义的
+
+橙色阶段是可编程的，这意味着可以将自己的代码上传到显卡上，从而精确的实现想要的操作。以片段着色器为例，通过对片段着色器的编程可以实现从纹理和光照到射线追踪器的任何东西。这些程序运行在多个GPU核心上，并行处理多个对象，比如并行的顶点和片段
+
+如果您以前使用过像 `OpenGL` 和 `Direct3D` 这样的老 api，那么您将习惯于可以随意更改像 `glBlendFunc` 和 `OMSetBlendState` 这样的调用的任何管道设置。Vulkan 中的绘图管线几乎是不可改变的，所以如果你想改变着色器，绑定不同的帧缓冲区或者改变混合函数，你必须从头开始重新创建管道。缺点是，您必须创建许多管道，它们代表您想要在呈现操作中使用的所有不同状态组合。但是，由于您将在管道中执行的所有操作都是事先知道的，因此驱动程序可以更好地优化它。
+
+一些可编程的阶段是可选的，基于你打算做什么。例如，如果你只是绘制简单的几何,那么镶嵌和几何阶段可以禁用。如果您只对深度值感兴趣，那么您可以禁用片段着色阶段，这对阴影贴图生成非常有用。
+
+在下一章，由于我们需要把一个三角形显示到屏幕上，所以将首先创建两个可编程阶段: 顶点着色器和片段着色器。固定功能的配置，如混合模式，视口，光栅化将在后面的章节中设置。在 Vulkan 中设置渲染管线的最后一部分将会涉及输入和输出帧缓冲器的规范。
+
+创建一个 `createGraphicsPipeline` 函数，该函数在 `initVulkan` 中的 `createImageViews` 之后被调用。我们将在下面的章节中讨论这个函数。
+
+```cpp
+void initVulkan() {
+    createInstance();
+    setupDebugMessenger();
+    createSurface();
+    pickPhysicalDevice();
+    createLogicalDevice();
+    createSwapChain();
+    createImageViews();
+    createGraphicsPipeline();
+}
+
+...
+
+void createGraphicsPipeline() {
+
+}
+```
 
