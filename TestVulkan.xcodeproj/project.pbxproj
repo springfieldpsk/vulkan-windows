@@ -30,6 +30,11 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		602479482687113D00280F83 /* shader.vert */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.glsl; path = shader.vert; sourceTree = "<group>"; };
+		602479492687114C00280F83 /* shader.frag */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.glsl; path = shader.frag; sourceTree = "<group>"; };
+		6024794A2687121B00280F83 /* compile.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = compile.sh; sourceTree = "<group>"; };
+		6024794B268716EA00280F83 /* vert.spv */ = {isa = PBXFileReference; lastKnownFileType = file; path = vert.spv; sourceTree = "<group>"; };
+		6024794C268716EE00280F83 /* frag.spv */ = {isa = PBXFileReference; lastKnownFileType = file; path = frag.spv; sourceTree = "<group>"; };
 		60BDF4A3267F4A2500EF86B6 /* TestVulkan */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = TestVulkan; sourceTree = BUILT_PRODUCTS_DIR; };
 		60BDF4A6267F4A2500EF86B6 /* main.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = main.cpp; sourceTree = "<group>"; };
 		60BDF4AE267F4C7000EF86B6 /* libglfw.3.3.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = libglfw.3.3.dylib; path = ../../../../opt/homebrew/Cellar/glfw/3.3.4/lib/libglfw.3.3.dylib; sourceTree = "<group>"; };
@@ -53,6 +58,18 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		602479462687109B00280F83 /* shaders */ = {
+			isa = PBXGroup;
+			children = (
+				6024794C268716EE00280F83 /* frag.spv */,
+				6024794B268716EA00280F83 /* vert.spv */,
+				602479482687113D00280F83 /* shader.vert */,
+				602479492687114C00280F83 /* shader.frag */,
+				6024794A2687121B00280F83 /* compile.sh */,
+			);
+			path = shaders;
+			sourceTree = "<group>";
+		};
 		60BDF49A267F4A2500EF86B6 = {
 			isa = PBXGroup;
 			children = (
@@ -75,6 +92,7 @@
 		60BDF4A5267F4A2500EF86B6 /* TestVulkan */ = {
 			isa = PBXGroup;
 			children = (
+				602479462687109B00280F83 /* shaders */,
 				60BDF4A6267F4A2500EF86B6 /* main.cpp */,
 				60BDF4C8267F568C00EF86B6 /* README.md */,
 			);
