@@ -2674,3 +2674,715 @@ if(vkEndCommandBuffer(commandBuffers[i]) != VK_SUCCESS){
 ```
 
 在下一章中，我们将为主循环编写代码，它将从交换链中获取映像，执行正确的命令缓冲区，并将完成的映像返回到交换链。
+
+#### Rendering and presentation 渲染和表示
+
+##### Setup 设置
+
+在这一章里，将会把之前所有做的东西合并到一起。我们将编写 `drawFrame` 函数，该函数将从主循环中调用，以将三角形放到屏幕上。创建函数并从 `mainLoop` 调用它:
+
+```cpp
+void mainLoop() {
+    while (!glfwWindowShouldClose(window)) {
+        glfwPollEvents();
+        drawFrame();
+    }
+}
+
+...
+
+void drawFrame() {
+
+}
+```
+
+##### Synchronization 同步
+
+`drawFrame` 函数将执行以下操作:
+
+- 从交换链中获取映像
+- 在帧缓冲中将该映像作为附件执行命令缓冲区
+- 将映像返回到交换链以便显示
+
+每个事件都是使用单个函数调用启动的，但它们是异步执行的。函数调用将在操作实际完成之前返回，并且执行顺序也未定义。这是不幸的，因为每个操作都依赖于前一个完成。
+
+有两种同步交换链事件的方法：fence和信号量。 它们都是可用于协调操作的对象，方法是存在一个操作信号，同时通过另一个操作等待fence或信号量让其从无信号状态变为有信号状态。
+
+信号量和fence之间的区别在于fence的状态可以通过`vkWaitForFences`这样的调用从程序中访问，而信号量则不能。fence主要用于将应用程序本身与渲染操作同步，而信号量则用于同步命令队列内部或跨命令队列的操作。我们希望同步绘制命令和表示的队列操作，这使得信号量最适合。
+
+##### Semaphores 信号量
+
+我们需要一个信号量来表示已经获取了一个图像并准备好进行渲染，另一个信号量来表示渲染已经完成并可以进行表示。创建两个类成员来存储这些信号量对象:
+
+```cpp
+VkSemaphore imageAvailableSemphore;
+VkSemaphore renderFinishedSemphore;
+```
+
+为了创建信号量，我们在`initVulkan`的这一部分添加了最后一个创建函数: `createSemaphores`:
+
+```cpp
+void initVulkan() {
+    createInstance();
+    setupDebugMessenger();
+    createSurface();
+    pickPhysicalDevice();
+    createLogicalDevice();
+    createSwapChain();
+    createImageViews();
+    createRenderPass();
+    createGraphicsPipeline();
+    createFramebuffers();
+    createCommandPool();
+    createCommandBuffers();
+    createSemaphores();
+}
+
+...
+
+void createSemaphores() {
+
+}
+```
+
+创建信号量需要填写 `VkSemaphoreCreateInfo`，但在当前版本的 API 中，除了 `sType` 之外，它实际上没有任何必需的字段:
+
+```cpp
+void createSemaphores() {
+    VkSemaphoreCreateInfo semaphoreInfo{};
+    semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+}
+```
+
+Vulkan API 或扩展的未来版本可能会像为其他结构一样为`flags`和 `pNext` 参数添加功能。创建信号量遵循 `vkCreateSemaphore` 熟悉的模式:
+
+```cpp
+if(vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemphore) != VK_SUCCESS || vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemphore) != VK_SUCCESS){
+    throw std::runtime_error("failed to create semaphores!");
+}
+```
+
+在程序结束时，当所有命令完成并且不再需要同步时，应该清除信号量:
+
+```cpp
+vkDestroySemaphore(device, imageAvailableSemphore, nullptr);
+vkDestroySemaphore(device, renderFinishedSemphore, nullptr);
+```
+
+##### Acquiring an image from the swap chain 从交换链中获取图像
+
+如前所述，在`drawFrame`函数中，我们需要做的第一件事是从交换链中获取图像。回想一下交换链是一个扩展特性，所以我们必须使用具有 `vk*KHR` 命名约定的函数：
+
+```cpp
+void drawFrame(){
+    uint32_t imageIndex;
+    vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemphore, VK_NULL_HANDLE, &imageIndex);
+    
+}
+```
+
+`vkAcquireNextImageKHR` 的前两个参数是我们希望从中获取图像的逻辑设备和交换链。 第三个参数指定图像变为可用的超时时间（以纳秒为单位）。 使用 64 位无符号整数的最大值可禁用超时。
+
+接下来的两个参数指定当表示引擎使用映像完成时要发出信号的同步对象。这就是我们可以开始描绘它的时间点。可以指定单信号量、单fence或者两者都指定。这里我们将使用 `imageAvailableSemaphore` 来实现这个目的。
+
+最后一个参数指定一个变量，用于输出已变为可用的交换链映像的索引。索引引用 `swapChainImages` 数组中的 `VkImage`。我们将使用该索引来选择正确的命令缓冲区。
+
+##### Submitting the command buffer 提交命令缓冲区
+
+队列提交和同步是通过 `VkSubmitInfo` 结构中的参数配置的。
+
+```cpp
+VkSubmitInfo submitInfo{};
+submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+
+VkSemaphore waitSemaphores[] = {imageAvailableSemphore};
+VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+submitInfo.waitSemaphoreCount = 1;
+submitInfo.pWaitSemaphores = waitSemaphores;
+submitInfo.pWaitDstStageMask = waitStages;
+```
+
+前三个参数指定在开始执行之前等待哪个信号量，以及在管道的哪个阶段等待。我们希望等到图像可用时再写入颜色，所以我们将指定了写入颜色附件的渲染管线。理论上这意味着当图像尚未可用时，我们已经可以开始执行顶点着色器等。`waitStages` 数组中的每个条目都对应于 `pWaitSemaphores` 中具有相同索引的信号量。
+
+```cpp
+submitInfo.commandBufferCount = 1;
+submitInfo.pCommandBuffers = &commandBuffers[imageIndex];
+```
+
+接下来的两个参数指定实际提交执行的命令缓冲区。正如前面提到的，我们应该提交用于绑定刚才作为颜色附件获得的交换链映像的命令缓冲区。
+
+```cpp
+VkSemaphore signalSemaphores[] = {renderFinishedSemphore};
+submitInfo.signalSemaphoreCount = 1;
+submitInfo.pSignalSemaphores = signalSemaphores;
+```
+
+`signalSemaphoreCount`和`pSignalSemaphores`参数指定命令缓冲区完成执行后发出信号的信号量。在我们的例子中，我们正在使用 `renderFinishedSemaphore` 来完成这个目的。
+
+```cpp
+if(vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS){
+    throw std::runtime_error("failed to submit draw command buffer!");
+}
+```
+
+现在，我们可以使用`vkQueueSubmit`.将命令缓冲提交到图形队列。当工作负载大得多时，该函数接受一个`VkSubmitInfo` 结构数组作为参数，以提高效率。最后一个参数引用了一个可选的fence，当命令缓冲区完成执行时，该fence将发出信号。我们使用信号量进行同步，所以我们只需传递一个`VK_NULL_HANDLE`
+
+##### Subpass dependencies 子通道依赖项
+
+请记住，渲染通道中的子通道会自动处理图像布局过渡。这些转换由子通道依赖项控制，它指定子通道之间的内存和执行依赖项。我们现在只有一个子通道，但是在这个子通道之前和之后的操作也被视为隐式的“子通道”。
+
+有两个内置的依赖项负责处理在渲染通道开始和渲染通道结束时的转换，但是前者不会在正确的时间出现。它假设转换发生在管道的开始，但是在这个时间点，我们还没有获得这个映像!处理这个问题有两种方法。我们可以将 `imageAvailableSemaphore` 的 `waitStages` 更改为`VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT`，以确保渲染通道在图像可用之前不会开始，或者我们可以让渲染通道等待`VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT`阶段。在这里使用第二种选择，因为这是一个很好的方法来研究子通道的依赖关系以及它们是如何工作的。
+
+子通道依赖关系是在 `VkSubpassDependency` 结构中指定的:
+
+```cpp
+// createRenderPass
+VkSubpassDependency dependency{};
+dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+dependency.dstSubpass = 0;
+```
+
+前两个字段指定依赖项和依赖子传递的索引。特殊值 `VK_SUBPASS_EXTERNAL` 是指渲染通道之前或之后的隐式子传递，具体取决于它是在 `srcSubpass` 还是 `dstSubpass`中指定的。索引0指向我们的子传递，这是第一个也是唯一的一个。`dstSubpass` 必须始终高于 `srcSubpass`，以防止依赖关系图中出现循环(除非其中一个子通道是 `VK_SUBPASS_EXTERNAL`)。
+
+```cpp
+dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+dependency.srcAccessMask = 0;
+```
+
+接下来的两个字段指定要等待的操作以及这些操作发生的阶段。我们需要等待交换链完成对映像的读取，然后才能访问它。这可以通过等待颜色附件输出阶段本身来实现。
+
+```cpp
+dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+```
+
+应该等待的操作处于颜色附加阶段，并且涉及到颜色附件的写入。这些设置将防止过渡发生，直到它实际上是必要的(和允许的) : 即我们想要向它写入颜色。
+
+```cpp
+renderPassInfo.dependencyCount = 1;
+renderPassInfo.pDependencies = &dependency;
+```
+
+更新`VkRenderPassCreateInfo` 结构，以添加对依赖项的指定
+
+##### Presentation 表示
+
+绘制帧的最后一步是将结果提交回交换链，以便最终显示在屏幕上。表示通过 `drawFrame` 函数末尾的 `VkPresentInfoKHR` 结构进行配置。
+
+```cpp
+VkPresentInfoKHR presentInfo{};
+presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+presentInfo.waitSemaphoreCount = 1;
+presentInfo.pWaitSemaphores = signalSemaphores;
+```
+
+前两个参数指定在演示之前等待哪个信号量，就像 `VkSubmitInfo` 一样。
+
+```cpp
+VkSwapchainKHR swapChains[] = {swapChain};
+presentInfo.swapchainCount = 1;
+presentInfo.pSwapchains = swapChains;
+presentInfo.pImageIndices = &imageIndex;
+```
+
+接下来的两个参数指定要显示图像的交换链以及每个交换链的图像索引。 这几乎总是一个。
+
+```cpp
+presentInfo.pResults = nullptr;
+```
+
+最后一个可选参数称为 `pResults`。它允许您指定 `VkResult` 值数组，以检查每个交换链(如果表示成功)。如果只使用单个交换链，则没有必要这样做，因为您可以简单地使用当前函数的返回值。
+
+`vkQueuePresentKHR` 函数提交向交换链显示映像的请求。我们将在下一章中为 `vkAcquireNextImageKHR` 和 `vkQueuePresentKHR` 添加错误处理，因为它们的失败并不一定意味着程序应该终止，不像我们之前那些函数那样。
+
+如果到目前为止你所做的一切都是正确的，那么当你运行你的程序时，你应该会看到类似下面这样的东西:
+
+![Triangle](triangle.png)
+
+> 这个彩色三角形可能与您在图形教程中看到的三角形略有不同。 这是因为本教程让着色器在线性颜色空间中进行插值，然后转换为 sRGB 颜色空间。 有关差异的讨论，请参阅[此博客](https://medium.com/@heypete/hello-triangle-meet-swift-and-wide-color-6f9e246616d9)文章。
+
+不幸的是，你会发现，当验证层被启用时，程序在您关闭它时就会崩溃。从 `debugCallback` 打印到终端的消息告诉我们原因:
+
+![semaphore_in_use](semaphore_in_use.png)
+
+请记住，`drawFrame` 中的所有操作都是异步的。这意味着当我们在 `mainLoop` 中退出循环时，绘图和表示操作可能仍在进行。在这种情况下难以清理资源。
+
+为了解决这个问题，我们应该等到逻辑设备完成操作后再退出 `mainLoop` 并销毁窗口:
+
+```cpp
+void mainLoop() {
+    while (!glfwWindowShouldClose(window)){
+        glfwPollEvents();
+        drawFrame();
+    }
+    
+    vkDeviceWaitIdle(device);
+}
+```
+
+您还可以等待使用`vkQueueWaitIdle`完成特定命令队列中的操作。这些函数可以用作执行同步的非常基本的方法。您将看到程序现在在关闭窗口时毫无问题地退出。
+
+##### Frames in flight
+
+如果您在启用验证层的情况下运行应用程序，可能会出现错误，或者注意到内存使用量在缓慢增长。出现这种状况的原因是应用程序在`drawFrame`函数中快速地提交作业，但实际上并不检查其中是否有任何工作完成。如果CPU提交工作的速度快于GPU能够处理的速度，那么队列会被作业慢慢地填满。更糟糕的是，我们正在同时为多个帧重用 `imageAvailableSemaphore` 和 `renderFinishedSemaphore` 信号量以及命令缓冲区！
+
+解决这个问题的简单方法是在作业提交之后等待工作完成，例如使用 `vkQueueWaitIdle`:
+
+```cpp
+void drawFrame() {
+    ...
+
+    vkQueuePresentKHR(presentQueue, &presentInfo);
+
+    vkQueueWaitIdle(presentQueue);
+}
+```
+
+然而，我们可能不会以这种方式最优化地使用 GPU，因为整个 GPU/GPU 绘图管线现在一次只能使用一帧。当前帧已经经过的阶段会处于空闲状态，而这些阶段可能可以用于下一帧。我们现在将扩展我们的应用程序以允许多个帧同时处于管线中，同时仍然限制堆积的作业量
+
+首先在程序顶部添加一个常量，定义应该同时处理多少帧
+
+```cpp
+const int MAX_FRAMES_IN_FLIGHT = 2;
+```
+
+同时扩展信号量定义，为每个帧添加自己的信号量:
+
+```cpp
+std::vector<VkSemaphore> imageAvailableSemphore;
+std::vector<VkSemaphore> renderFinishedSemphore;
+```
+
+改变 `createSemaphores` 函数以初始化信号量
+
+```cpp
+for(size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i ++){
+    if(vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemphore[i]) != VK_SUCCESS || vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemphore[i]) != VK_SUCCESS){
+        throw std::runtime_error("failed to create semaphores!");
+    }
+}
+```
+
+同样，它们也应该在`cleanup`中全部清理干净:
+
+```cpp
+void cleanup() {
+    for(size_t i = 0; i < MAX_FRAMES_IN_FLIGHT ; i++){
+        vkDestroySemaphore(device, imageAvailableSemphore[i], nullptr);
+        vkDestroySemaphore(device, renderFinishedSemphore[i], nullptr);
+    }
+    ...
+}
+```
+
+要每次使用正确的信号量对，我们需要跟踪当前帧。我们将为此使用框架索引
+
+```cpp
+size_t currentFrame = 0;
+```
+
+现在可以修改 `drawFrame` 函数来使用正确的对象:
+
+```cpp
+void drawFrame() {
+    vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
+
+    ...
+
+    VkSemaphore waitSemaphores[] = {imageAvailableSemaphores[currentFrame]};
+
+    ...
+
+    VkSemaphore signalSemaphores[] = {renderFinishedSemaphores[currentFrame]};
+
+    ...
+}
+```
+
+当然，我们不应该每次都忘记进入下一个阶段:
+
+```cpp
+void drawFrame() {
+    ...
+
+    currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
+}
+```
+
+通过使用模(%)运算符，我们确保每个`MAX_FRAMES_IN_FLIGHT`入队帧后都有帧索引循环。
+
+虽然我们现在已经设置了所需的对象，以便于同时处理多个帧，但我们仍然没有实际阻止超过`MAX_FRAMES_IN_FLIGHT`被提交。现在只有 GPU-GPU 同步，没有 CPU-GPU 同步来跟踪工作的进展。当我们使用第0帧对象时，第0帧对象可能仍在管线中！
+
+为了执行 CPU-GPU 同步，Vulkan 提供了第二种类型的同步原语，称为 fences。栅栏类似于信号量，因为它们可以被发出信号并等待，但是这次我们实际上是在我们自己的代码中等待它们。我们首先为每一帧创建一个栅栏:
+
+```cpp
+std::vector<VkSemaphore> imageAvailableSemphore;
+std::vector<VkSemaphore> renderFinishedSemphore;
+std::vector<VkFence> inFlightFences;
+size_t currentFrame = 0;
+```
+
+我们将让信号量和fences一起创建，并将 `createSemaphores` 重命名为 `createSyncObjects`:
+
+```cpp
+void createSyncObjects(){
+    imageAvailableSemphore.resize(MAX_FRAMES_IN_FLIGHT);
+    renderFinishedSemphore.resize(MAX_FRAMES_IN_FLIGHT);
+    inFlightFences.resize(MAX_FRAMES_IN_FLIGHT);
+    
+    VkSemaphoreCreateInfo semaphoreInfo{};
+    semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    
+    VkFenceCreateInfo fenceInfo{};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    
+    for(size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i ++){
+        if(vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemphore[i]) != VK_SUCCESS || vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemphore[i]) != VK_SUCCESS || vkCreateFence(device, &fenceInfo, nullptr, &inFlightFences[i]) != VK_SUCCESS){
+            throw std::runtime_error("failed to create synchronization objects for a frame!");
+        }
+    }
+}
+```
+
+fence(`VkFence`)的创建与信号量的创建非常相似。还要确保清理好fence:
+
+```cpp
+void cleanup() {
+    for(size_t i = 0; i < MAX_FRAMES_IN_FLIGHT ; i++){
+        vkDestroySemaphore(device, imageAvailableSemphore[i], nullptr);
+        vkDestroySemaphore(device, renderFinishedSemphore[i], nullptr);
+        vkDestroyFence(device, inFlightFences[i], nullptr);
+    }
+    ...
+```
+
+现在我们将更改 `drawFrame` 以使用 fences 进行同步。`vkQueueSubmit` 调用包含一个可选参数，用于传递一个 fence，该 fence 应该在命令缓冲区执行完毕时发出信号。我们可以使用这个信号，表示该帧已经创建完成。
+
+```cpp
+void drawFrame() {
+    ...
+
+    if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]) != VK_SUCCESS) {
+        throw std::runtime_error("failed to submit draw command buffer!");
+    }
+    ...
+}
+```
+
+现在剩下的唯一事情就是改变 `drawFrame` 的开头，等待帧完成:
+
+```cpp
+void drawFrame() {
+    vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
+    vkResetFences(device, 1, &inFlightFences[currentFrame]);
+
+    ...
+}
+```
+
+`vkWaitForFences`函数接受一组fence，并等待其中任何一个或所有fence在返回之前收到信号。我们在这里使用的`VK_TRUE`表明我们想等待所有的fence，但是对于一个fence来说，这显然不重要。就像`vkAcquireNextImageKHR`一样，这个函数也需要一个超时。与信号量不同，我们需要通过重置`vkResetFences` 调用将 fence 恢复到无信号状态。
+
+如果你现在运行这个程序，你会注意到一些奇怪的东西。这个应用程序似乎不再渲染任何内容。启用验证层后，您将看到以下消息:
+
+![unsubmitted_fence](unsubmitted_fence.png)
+
+这意味着我们正在等待一个还没有提交的fence。这里的问题是，默认情况下，fence是在无信号状态下创建的。这意味着，如果我们以前没有使用过 `vkWaitForFences`，那么 `vkWaitForFences`将永远等待。为了解决这个问题，我们可以改变fence的创建，将其初始化为有信号状态，就好像我们已经渲染结束了一个初始帧:
+
+```cpp
+void createSyncObjects() {
+    ...
+
+    VkFenceCreateInfo fenceInfo{};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+
+    ...
+}
+```
+
+现在内存泄漏的问题已经得到解决，但是程序还没有完全正常工作。如果 `MAX_FRAMES_IN_FLIGHT`大于交换链映像的数量，或者 `vkAcquireNextImageKHR` 返回无序的映像，那么我们可以开始渲染已经在运行的交换链映像。为了避免这种情况，我们需要跟踪每个交换链映像，如果一个正在管线的帧当前正在使用它。这个映射将根据它们的fence引用管线中的帧，所以我们将立即有一个同步对象来等待一个可以使用这个图像的新帧。
+
+首先添加一个新的列表 imageinflight 来跟踪:
+
+```cpp
+std::vector<VkFence> inFlightFences;
+std::vector<VkFence> imagesInFlight;
+size_t currentFrame = 0;
+```
+
+在`createSyncObjects`中初始化
+
+```cpp
+void createSyncObjects() {
+    imageAvailableSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
+    renderFinishedSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
+    inFlightFences.resize(MAX_FRAMES_IN_FLIGHT);
+    imagesInFlight.resize(swapChainImages.size(), VK_NULL_HANDLE);
+
+    ...
+}
+```
+
+最初没有一个帧使用映像，因此我们显式初始化它为没有fence。现在我们修改 `drawFrame` 来等待任何使用我们刚刚为新帧分配的映像的先前帧:
+
+```cpp
+void drawFrame() {
+    ...
+
+    vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
+
+    // Check if a previous frame is using this image (i.e. there is its fence to wait on)
+    if (imagesInFlight[imageIndex] != VK_NULL_HANDLE) {
+        vkWaitForFences(device, 1, &imagesInFlight[imageIndex], VK_TRUE, UINT64_MAX);
+    }
+    // Mark the image as now being in use by this frame
+    imagesInFlight[imageIndex] = inFlightFences[currentFrame];
+
+    ...
+}
+```
+
+因为我们现在有更多的 `vkWaitForFences` 调用，`vkResetFences` 调用应该被移动。最好简单地在真正使用栅栏之前调用:
+
+```cpp
+void drawFrame() {
+    ...
+
+    vkResetFences(device, 1, &inFlightFences[currentFrame]);
+
+    if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]) != VK_SUCCESS) {
+        throw std::runtime_error("failed to submit draw command buffer!");
+    }
+
+    ...
+}
+```
+
+我们现在已经实现了所有需要的同步，以确保工作排队的帧不超过两帧，并且这些帧不会意外地使用相同的图像。请注意，对于代码的其他部分，比如最后的清理，依赖于更粗糙的同步，比如 `vkDeviceWaitIdle`，这是可以的。您应该根据性能需求来决定使用哪种方法。
+
+要通过示例了解更多关于同步的信息，请看 Khronos 的[这篇](https://github.com/KhronosGroup/Vulkan-Docs/wiki/Synchronization-Examples#swapchain-image-acquire-and-present)广泛的概述。
+
+##### Conclusion 总结
+
+经过900多行代码之后，我们终于看到屏幕上弹出了一些东西！引导 Vulkan 程序绝对是一项繁重的工作，但是带走的信息是 Vulkan 通过它的明确性给了你巨大的控制力。我建议您现在花一些时间重读代码，并构建一个心理模型，说明程序中所有 Vulkan 对象的用途以及它们之间的关系。从现在开始，我们将在这些知识的基础上扩展程序的功能。
+
+### Swap chain recreation 重建交换链
+
+#### Introduction 引言
+
+我们现在已经成功地绘制了一个三角形，但是还有一些情况没有正确地处理。窗口表面可能会发生更改，以致交换链不再与其兼容。导致这种情况发生的原因之一是窗口大小的变化。我们必须捕获这些事件并重新创建交换链。
+
+#### Recreating the swap chain 重建交换链
+ 
+ 创建一个新的 `recreateSwapChain` 函数，该函数调用 `createSwapChain` 以及依赖于交换链或窗口大小的对象的所有创建函数。
+
+```cpp
+void recreateSwapChain(){
+    vkDeviceWaitIdle(device);
+    
+    createSwapChain();
+    createImageViews();
+    createRenderPass();
+    createGraphicsPipeline();
+    createFramebuffers();
+    createCommandBuffers();
+}
+```
+
+我们首先调用`vkDeviceWaitIdle`，因为就像上一章一样，我们不应该接触可能仍在使用的资源。显然，我们要做的第一件事就是重新创建交换链本身。需要重新创建映像视图，因为它们直接基于交换链映像。需要重新创建渲染通道，因为它取决于交换链映像的格式。在窗口调整等操作中，交换链映像格式很少发生更改，但仍应对其进行处理。视口和裁剪的矩形大小是在绘图管线创建过程中指定的，所以管道也需要重建。可以通过使用动态状态的视口和裁剪矩形来避免这种情况。最后，帧缓冲区和命令缓冲区也直接依赖于交换链映像。
+
+为了确保在重新创建这些对象之前对其旧版本进行清理，我们应该将一些清理代码移动到一个单独的函数中，这个函数可以从 `recreateSwapChain` 函数中调用。让我们称之为 `cleanupSwapChain`:
+
+```cpp
+void cleanupSwapChain(){
+    
+}
+
+void recreateSwapChain(){
+    vkDeviceWaitIdle(device);
+    
+    cleanupSwapChain();
+    
+    createSwapChain();
+    createImageViews();
+    createRenderPass();
+    createGraphicsPipeline();
+    createFramebuffers();
+    createCommandBuffers();
+}
+```
+
+我们将把所有创建的交换链对象的清理代码从 `cleanup` 移动到 `cleanupSwapChain`:
+
+```cpp
+void cleanupSwapChain(){
+    for (size_t i = 0; i < swapChainFramebuffers.size(); i++) {
+        vkDestroyFramebuffer(device, swapChainFramebuffers[i], nullptr);
+    }
+    
+    vkFreeCommandBuffers(device, commandPool, static_cast<uint32_t>(commandBuffers.size()), commandBuffers.data());
+    
+    vkDestroyPipeline(device, graphicsPipeline, nullptr);
+    vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+    vkDestroyRenderPass(device, renderPass, nullptr);
+    
+    for (size_t i = 0; i < swapChainImageViews.size(); i++) {
+        vkDestroyImageView(device, swapChainImageViews[i], nullptr);
+    }
+    
+    vkDestroySwapchainKHR(device, swapChain, nullptr);
+}
+
+void cleanup() {
+    cleanupSwapChain();
+    
+    for(size_t i = 0; i < MAX_FRAMES_IN_FLIGHT ; i++){
+        vkDestroySemaphore(device, imageAvailableSemphore[i], nullptr);
+        vkDestroySemaphore(device, renderFinishedSemphore[i], nullptr);
+        vkDestroyFence(device, inFlightFences[i], nullptr);
+    }
+    
+    vkDestroyCommandPool(device, commandPool, nullptr);
+    
+    vkDestroyDevice(device, nullptr);
+    
+    if(enableValidationLayers){
+        DestroyDebugUtilsMessengerEXT(instance, debugMessenger, nullptr);
+    }
+    vkDestroySurfaceKHR(instance, surface, nullptr);
+    vkDestroyInstance(instance, nullptr);
+    // 清理 vk 实例
+    glfwDestroyWindow(window);
+    // 清理窗口
+    glfwTerminate();
+    // 关闭glfw
+}
+```
+
+我们可以从头开始重新创建命令池，但这相当浪费。因此我们选择使用 `vkFreeCommandBuffers` 函数清理现有的命令缓冲区。这样我们就可以重用现有的池来分配新的命令缓冲区。
+
+请注意，在 `chooseSwapExtent` 中，我们已经查询了新的窗口分辨率，以确保交换链映像具有(新的)正确的大小，因此不需要修改 `chooseSwapExtent` (请记住，在创建交换链时，我们已经使用 `glfwGetFramebufferSize` 来获得窗口的像素分辨率)。
+
+这就是重新创建交换链的全部过程！但是，这种方法的缺点是在创建新的交换链之前需要停止所有渲染。可以创建一个新的交换链，同时从旧交换链的映像上绘制命令仍在运行。您需要将前面的交换链传递到 `VkSwapchainCreateInfoKHR` 结构中的 `oldSwapChain` 字段，并在完成使用后立即销毁旧的交换链。
+
+#### Suboptimal or out-of-date swap chain 次优或过时的交换链
+
+现在我们只需要找出什么时候需要进行交换链重新创建，并调用新的 recreateSwapChain 函数。幸运的是，Vulkan 通常会告诉我们交换链在渲染过程中已经不够用了。`vkAcquireNextImageKHR`和`vkQueuePresentKHR`函数可以返回以下特殊值来表示这一点。
+
+- `VK_ERROR_OUT_OF_DATE_KHR` 交换链与表面不兼容，不能再用于渲染。通常发生在调整窗口大小之后
+- `VK_SUBOPTIMAL_KHR` 交换链仍然可以成功地渲染在表面，但表面性质不再完全匹配
+
+```cpp
+\\ drawFrame
+VkResult result = vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
+
+if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+    recreateSwapChain();
+    return;
+} else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+    throw std::runtime_error("failed to acquire swap chain image!");
+}
+```
+
+如果在尝试获取映像时发现交换链已经过时，则不再可能向其显示该交换链。因此，我们应该立即重新创建交换链，并在下一个 drawFrame 调用中再次尝试。
+
+如果交换链不是最优的，您也可以决定这样做，但是我选择在这种情况下继续，因为我们已经获得了一个映像。`VK_SUCCESS` 和 `VK_SUBOPTIMAL_KHRr` 都被认为是“成功”的返回码。
+
+```cpp
+result = vkQueuePresentKHR(presentQueue, &presentInfo);
+
+if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
+    recreateSwapChain();
+} else if (result != VK_SUCCESS) {
+    throw std::runtime_error("failed to present swap chain image!");
+}
+
+currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
+```
+
+`vkQueuePresentKHR` 函数返回具有相同含义的相同值。在这种情况下，如果交换链不是最优的，我们也将重新创建它，因为我们希望得到最好的结果。
+
+#### Handling resizes explicitly 显式地处理大小调整
+
+虽然许多驱动程序和平台在调整窗口大小后会自动触发`VK_ERROR_OUT_OF_DATE_KHR`，但这并不一定会发生。这就是为什么我们要添加一些额外的代码来显式地处理大小调整。首先添加一个新的成员变量，标记已经发生了大小调整:
+
+```cpp
+std::vector<VkFence> inFlightFences;
+size_t currentFrame = 0;
+
+bool framebufferResized = false;
+```
+
+然后应该修改 `drawFrame` 函数来检查这个标志:
+
+```cpp
+if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || framebufferResized) {
+    framebufferResized = false;
+    recreateSwapChain();
+} else if (result != VK_SUCCESS) {
+    ...
+}
+```
+
+在 `vkQueuePresentKHR` 之后这样做很重要，以确保信号量处于一致状态，否则信号量可能永远不会被正确等待。现在为了实际检测大小，我们可以使用 `GLFW` 框架中的 `glfwSetFramebufferSizeCallback` 函数来设置一个回调:
+
+```cpp
+void initWindow() {
+    glfwInit();
+
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+
+    window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan", nullptr, nullptr);
+    glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
+}
+
+static void framebufferResizeCallback(GLFWwindow* window, int width, int height) {
+
+}
+```
+
+由于GLFW 不知道如何正确地调用右边是指向 HelloTriangleApplication 实例的指针的成员函数，因此我们创建一个静态函数作为回调函数。
+
+然而，我们确实在回调函数中得到了一个对 `GLFWwindow` 的引用，并且还有另外一个 GLFW 函数允许你在它里面存储一个任意的指针: `glfwSetWindowUserPointerr`:
+
+```cpp
+window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan", nullptr, nullptr);
+glfwSetWindowUserPointer(window, this);
+glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
+```
+
+这个值现在可以通过使用 `glfwGetWindowUserPointer` 从回调函数中检索，以正确设置标志:
+
+```
+static void framebufferResizeCallback(GLFWwindow* window, int width, int height) {
+    auto app = reinterpret_cast<HelloTriangleApplication*>(glfwGetWindowUserPointer(window));
+    app->framebufferResized = true;
+}
+```
+
+现在尝试运行程序并调整窗口的大小，以查看 framebuffer 是否确实与窗口一起正确调整了大小。
+
+#### Handling minimization 处理最小化
+
+还有另一种情况，交换链可能成为数据外，这是一种特殊类型的窗口大小调整: 窗口最小化。这种情况是特殊的，因为它将导致帧缓冲区大小为0。在本教程中，我们将通过扩展 `recreateSwapChain` 函数来处理这个问题:
+
+```cpp
+void recreateSwapChain() {
+    int width = 0, height = 0;
+    glfwGetFramebufferSize(window, &width, &height);
+    while (width == 0 || height == 0) {
+        glfwGetFramebufferSize(window, &width, &height);
+        glfwWaitEvents();
+    }
+
+    vkDeviceWaitIdle(device);
+
+    ...
+}
+```
+
+对`glfwGetFramebufferSize`的初始调用处理大小已经正确并且`glfwWaitEvents`将没有什么可等待的情况。
+
+
+恭喜你，你现在已经完成了你的第一个表现良好的 Vulkan 程序！在下一章中，我们将去掉顶点着色器中硬编码的顶点，并实际使用顶点缓冲区。
+
